@@ -1,0 +1,42 @@
+name: Build TGH C++ ASI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC (x86)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Unpack TGH_CPP_pack.zip
+        shell: pwsh
+        run: |
+          Expand-Archive -Path TGH_CPP_pack.zip -DestinationPath . -Force
+          Get-ChildItem TGH_CPP
+
+      - name: Generate ScriptHook.lib from ScriptHook.def
+        shell: cmd
+        run: |
+          cd TGH_CPP
+          lib /nologo /def:ScriptHook.def /machine:x86 /out:ScriptHook.lib
+          dir ScriptHook.lib
+
+      - name: Compile TGHMod.asi
+        shell: cmd
+        run: |
+          cd TGH_CPP
+          cl /nologo /LD /MT /EHsc /O2 /D_CRT_SECURE_NO_WARNINGS /I. src\TGHMod.cpp /link /MACHINE:X86 /OUT:TGHMod.asi ScriptHook.lib user32.lib
+          dir TGHMod.asi
+
+      - name: Upload ASI
+        uses: actions/upload-artifact@v4
+        with:
+          name: TGHMod_asi
+          path: TGH_CPP/TGHMod.asi
