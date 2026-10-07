@@ -28,20 +28,11 @@ jobs:
           lib /nologo /def:ScriptHook.def /machine:x86 /out:ScriptHook.lib
           dir ScriptHook.lib
 
-      # ========== 新增的步骤：把你的代码复制到 src 目录 ==========
-      - name: Copy source code to src folder
-        shell: cmd
-        run: |
-          cd TGH_CPP
-          if not exist src mkdir src
-          copy ..\TGHMod-5.cpp src\TGHMod.cpp
-      # ========================================================
-
       - name: Compile TGHMod.asi
         shell: cmd
         run: |
           cd TGH_CPP
-          cl /nologo /LD /MT /EHsc /O2 /D_CRT_SECURE_NO_WARNINGS /I. src\TGHMod.cpp /link /MACHINE:X86 /OUT:TGHMod.asi ScriptHook.lib user32.lib
+          cl /nologo /LD /MT /EHsc /O2 /D_CRT_SECURE_NO_WARNINGS /I. src\*.cpp /link /MACHINE:X86 /OUT:TGHMod.asi ScriptHook.lib user32.lib
           dir TGHMod.asi
 
       - name: Upload ASI
