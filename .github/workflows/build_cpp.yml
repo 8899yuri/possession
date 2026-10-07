@@ -34,7 +34,7 @@ jobs:
         run: |
           cd TGH_CPP
           if not exist src mkdir src
-          copy ..\TGHMod-1.cpp src\TGHMod.cpp
+          copy ..\TGHMod-5.cpp src\TGHMod.cpp
       # ========================================================
 
       - name: Compile TGHMod.asi
