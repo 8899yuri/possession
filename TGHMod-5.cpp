@@ -50,7 +50,11 @@ static const int STICK_DEADZONE = 24;      // 摇杆死区（0~127）
 static const bool STICK_INVERT_Y = false;  // 右摇杆上下方向反了就改成 true
 static const f32 SCAN_MAX       = 45.0f;   // G 选人：沿视线最远扫描距离
 static const f32 SCAN_STEP      = 1.5f;    // G 选人：扫描步长
-static const int NUM_WEAPON_SLOTS = 18;    // 保存武器时检查的槽位数
+static const int MAX_WEAPON_ID  = 50;      // 保存武器时检查的武器编号上限
+static const int NUM_WEAPON_SLOTS = 50;    // 武器缓存数组大小（>= MAX_WEAPON_ID）
+static const bool ENABLE_MOUSE_LOOK = true;   // 鼠标转视角（卡顿就改成 false）
+static const bool ENABLE_STICK_LOOK = true;   // 右摇杆转视角（卡顿就改成 false）
+static const bool ENABLE_WEAPON_KEEP = true;  // 换回 Niko 时恢复武器（卡顿就改成 false）
 static const int NUM_COMP       = 11;     // 复制外观时处理的部件数（head..face）
 
 static const f32 PI_F = 3.14159265f;
@@ -132,6 +136,8 @@ private:
     bool   m_needRestore;        // 附身时死亡 -> 复活后要把模型换回 Niko
 
     bool   m_mouseInit;
+    int    m_lastX, m_lastY;
+    bool   m_firstLook;
     int    m_wList[NUM_WEAPON_SLOTS];   // Niko 的武器和弹药
     u32    m_wAmmo[NUM_WEAPON_SLOTS];
     int    m_wCount;
@@ -192,12 +198,12 @@ private:
     {
         m_wCount = 0;
         m_wCur = 0;
-        for (int s = 0; s < NUM_WEAPON_SLOTS; s++)
+        m_nikoArmour = 0;
+        if (!ENABLE_WEAPON_KEEP) return;
+
+        for (int w = 1; w <= MAX_WEAPON_ID; w++)
         {
-            eWeapon w = 0;
-            ScriptAny u1 = 0, u2 = 0;
-            GetCharWeaponInSlot(m_niko, s, &w, &u1, &u2);
-            if (w == 0) continue;
+            if (!HasCharGotWeapon(m_niko, w)) continue;
             u32 ammo = 0;
             GetAmmoInCharWeapon(m_niko, w, &ammo);
             m_wList[m_wCount] = w;
@@ -205,7 +211,6 @@ private:
             m_wCount++;
         }
         GetCurrentCharWeapon(m_niko, &m_wCur);
-        m_nikoArmour = 0;
         GetCharArmour(m_niko, &m_nikoArmour);
         LogMsg("保存武器 %d 把，护甲 %u", m_wCount, (unsigned)m_nikoArmour);
     }
@@ -225,58 +230,72 @@ private:
     // ---- 鼠标 / 右摇杆转视角（灵魂模式） ----
     void LookInput()
     {
-        // 鼠标：读取光标相对窗口中心的偏移，然后把光标放回中心
-        HWND h = GetForegroundWindow();
-        if (h && GameFocused())
+        if (m_firstLook) { LogMsg("LookInput 首帧开始"); }
+
+        if (ENABLE_MOUSE_LOOK)
         {
-            RECT rc;
-            if (GetClientRect(h, &rc))
+            HWND h = GetForegroundWindow();
+            if (h && GameFocused())
             {
-                POINT c;
-                c.x = rc.right / 2;
-                c.y = rc.bottom / 2;
-                ClientToScreen(h, &c);
                 POINT p;
                 if (GetCursorPos(&p))
                 {
                     if (m_mouseInit)
                     {
-                        int dx = p.x - c.x, dy = p.y - c.y;
-                        if (dx > -300 && dx < 300 && dy > -300 && dy < 300 && (dx != 0 || dy != 0))
+                        int dx = p.x - m_lastX, dy = p.y - m_lastY;
+                        if (dx > -300 && dx < 300 && dy > -300 && dy < 300)
                         {
                             m_yaw   -= dx * MOUSE_SENS;
                             m_pitch -= dy * MOUSE_SENS;
                         }
                     }
-                    SetCursorPos(c.x, c.y);
+                    m_lastX = p.x; m_lastY = p.y;
                     m_mouseInit = true;
+
+                    // 光标靠近窗口边缘时才拉回中心（不再每帧调用 SetCursorPos）
+                    RECT rc;
+                    if (GetClientRect(h, &rc))
+                    {
+                        POINT o; o.x = 0; o.y = 0;
+                        ClientToScreen(h, &o);
+                        int w = rc.right, hh = rc.bottom;
+                        if (p.x < o.x + 80 || p.x > o.x + w - 80 || p.y < o.y + 80 || p.y > o.y + hh - 80)
+                        {
+                            SetCursorPos(o.x + w / 2, o.y + hh / 2);
+                            m_lastX = o.x + w / 2; m_lastY = o.y + hh / 2;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                m_mouseInit = false;
+            }
+        }
+        if (m_firstLook) { LogMsg("LookInput 鼠标部分完成"); }
+
+        if (ENABLE_STICK_LOOK)
+        {
+            u32 lx = 0, ly = 0, rx = 0, ry = 0;
+            GetPositionOfAnalogueSticks(0, &lx, &ly, &rx, &ry);
+            int sx = (int)(i32)rx, sy = (int)(i32)ry;
+            static int s_logged = 0;
+            if ((sx > STICK_DEADZONE || sx < -STICK_DEADZONE || sy > STICK_DEADZONE || sy < -STICK_DEADZONE) && s_logged < 5)
+            {
+                LogMsg("右摇杆读数 x=%d y=%d", sx, sy);
+                s_logged++;
+            }
+            if (sx >= -127 && sx <= 127 && sy >= -127 && sy <= 127)
+            {
+                if (sx > STICK_DEADZONE || sx < -STICK_DEADZONE) m_yaw -= (sx / 127.0f) * STICK_YAW;
+                if (sy > STICK_DEADZONE || sy < -STICK_DEADZONE)
+                {
+                    f32 k = (sy / 127.0f) * STICK_PITCH;
+                    m_pitch += STICK_INVERT_Y ? k : -k;
                 }
             }
         }
-        else
-        {
-            m_mouseInit = false;
-        }
-
-        // 右摇杆（虚拟手柄）
-        u32 lx = 0, ly = 0, rx = 0, ry = 0;
-        GetPositionOfAnalogueSticks(0, &lx, &ly, &rx, &ry);
-        int sx = (int)(i32)rx, sy = (int)(i32)ry;
-        static int s_logged = 0;
-        if ((sx > STICK_DEADZONE || sx < -STICK_DEADZONE || sy > STICK_DEADZONE || sy < -STICK_DEADZONE) && s_logged < 5)
-        {
-            LogMsg("右摇杆读数 x=%d y=%d", sx, sy);
-            s_logged++;
-        }
-        if (sx >= -127 && sx <= 127 && sy >= -127 && sy <= 127)
-        {
-            if (sx > STICK_DEADZONE || sx < -STICK_DEADZONE) m_yaw -= (sx / 127.0f) * STICK_YAW;
-            if (sy > STICK_DEADZONE || sy < -STICK_DEADZONE)
-            {
-                f32 k = (sy / 127.0f) * STICK_PITCH;
-                m_pitch += STICK_INVERT_Y ? k : -k;
-            }
-        }
+        if (m_firstLook) { LogMsg("LookInput 摇杆部分完成"); m_firstLook = false; }
 
         if (m_pitch > 1.4f) m_pitch = 1.4f;
         if (m_pitch < -1.4f) m_pitch = -1.4f;
@@ -381,10 +400,14 @@ private:
         GetCharCoordinates(m_niko, &x, &y, &z);
         GetCharHeading(m_niko, &h);
 
+        LogMsg("SpiritOn: 开始保存 Niko 状态");
         GetCharModel(m_niko, &m_nikoModel);
         SaveComponents(m_niko, m_nikoDV, m_nikoTV);
+        LogMsg("SpiritOn: 外观已保存");
         SaveWeapons();
+        LogMsg("SpiritOn: 武器已保存");
         m_mouseInit = false;
+        m_firstLook = true;
 
         m_yaw = h * PI_F / 180.0f;
         m_pitch = -0.35f;
@@ -664,7 +687,7 @@ public:
           m_camX(0), m_camY(0), m_camZ(0), m_yaw(0), m_pitch(0), m_groundZ(0),
           m_convulseEnd(0), m_nextShake(0), m_rng(12345u),
           m_nikoModel(0), m_needRestore(false),
-          m_mouseInit(false), m_wCount(0), m_wCur(0), m_nikoArmour(0)
+          m_mouseInit(false), m_lastX(0), m_lastY(0), m_firstLook(true), m_wCount(0), m_wCur(0), m_nikoArmour(0)
     {
         for (int i = 0; i < NUM_WEAPON_SLOTS; i++) { m_wList[i] = 0; m_wAmmo[i] = 0; }
         for (int i = 0; i < NUM_COMP; i++) { m_nikoDV[i] = 0; m_nikoTV[i] = 0; }
