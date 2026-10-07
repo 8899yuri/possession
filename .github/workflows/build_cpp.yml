@@ -15,14 +15,12 @@ jobs:
         with:
           arch: x86
 
-      - name: Unpack TGH_CPP_pack.zip
+      - name: Unpack Original Zip
         shell: pwsh
         run: |
-          # 清理可能残留的文件夹，防止报错
           if (Test-Path TGH_CPP) { Remove-Item -Recurse -Force TGH_CPP }
-          # 使用更稳定的 tar 命令解压，替换掉容易报错的 Expand-Archive
-          tar -xf TGH_CPP_pack.zip
-          # 查看解压出来的结构
+          # 直接解压Claude的原版包，它会自动生成正确的 TGH_CPP 文件夹
+          tar -xf TGH_CPP_latest-1.zip
           Get-ChildItem TGH_CPP
 
       - name: Generate ScriptHook.lib from ScriptHook.def
@@ -36,7 +34,6 @@ jobs:
         shell: cmd
         run: |
           cd TGH_CPP
-          # 注意这里用的是 *.cpp 通配符，会自动编译 src 文件夹里所有的 cpp 源码
           cl /nologo /LD /MT /EHsc /O2 /D_CRT_SECURE_NO_WARNINGS /I. src\*.cpp /link /MACHINE:X86 /OUT:TGHMod.asi ScriptHook.lib user32.lib
           dir TGHMod.asi
 
