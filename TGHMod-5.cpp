@@ -1,28 +1,41 @@
-// TGHMod  (C++ ASI, 基于 Aru 的 GTA IV ScriptHook SDK)   —— v8
+// TGHMod  (C++ ASI, 基于 Aru 的 GTA IV ScriptHook SDK)   —— v6（排查闪退版）
+//
+// v6 改动：T 键走的新功能全部做成"运行时开关"，由游戏目录里的 TGHMod.ini 控制，
+//          不用重新编译就能逐项打开，找出是哪一项导致 T 闪退。
+//          没有 TGHMod.ini 时，所有高风险功能默认关闭（行为接近旧版）。
+//          日志（TGHMod.log）里会写明读到的开关值，并在每一步之前先写一行。
+//
+// v7 改动（只改 ini 解决不了的部分，鼠标/外观/开关逻辑保持 v6 不变）：
+//   1. G 选人：沿视线分近/中/远三段取样，近处密、半径小，避免被旁边的人/尸体抢走；
+//      严格判定没找到时，再按"视线夹角"宽松兜底（约 26 度以内）。
+//   2. 没找到目标时，屏幕提示最近的人在哪个方向（向左/右、向上/下转多少度），方便你调整视角。
+//   3. AutoScan=1 时，锁定/丢失目标会有文字提示（不依赖准星是否画得出来）。
+//   4. 抽搐改成癫痫发作的节律：0.35 秒强直，然后约 4 次/秒来回抽动，幅度逐渐减弱；
+//      不再施加向上的力，不会再飞起来摔伤。
 //
 // 按键：
-//   T  灵魂出窍：Niko 原地留下一具尸体，本体隐身，镜头脱离自由飞行
+//   T  灵魂出窍：Niko 原地冻结，镜头脱离，自由飞行
 //   G  附身：镜头对准的 NPC 倒地抽搐 1.8 秒，然后你"变成"他（真正的玩家控制）
-//   H  返回 Niko（被附身的 NPC 倒地变成尸体，Niko 回到按 T 时的位置）
+//   H  返回 Niko
 //
 // 灵魂状态：
-//   鼠标 / 右摇杆：转视角
 //   W/S 沿镜头朝向前进/后退（往下看再按 W 就会下降）  A/D 左右平移
 //   上升：Space 或 PageUp    下降：C 或 PageDown    Shift 加速
-//   转向：Q/E 或 ←/→         俯仰：R/F 或 ↑/↓       （键盘转视角永远可用）
+//   转向：Q/E 或 ←/→         俯仰：R/F 或 ↑/↓
+//   鼠标 / 右摇杆：直接转视角
 // 附身状态：完全就是正常玩游戏（走、跑、攻击、上车都可以），按 H 变回 Niko
 //
-// v8 改动：
-//   1. 鼠标转视角：新增"原始输入（Raw Input）"读取。之前读光标位置的做法在这个环境里读不到
-//      位移（光标被游戏/兼容层锁在中心），所以视角一直不动。现在优先用原始输入，
-//      读不到时才退回光标回中法；日志里会记录读到的原始输入，方便继续调。
-//   2. G 选人：每次探测前先重置搜索条件（BeginCharSearchCriteria / EndCharSearchCriteria，
-//      ScriptHookDotNet 也是这样调用的）；改成"收集一批候选人，再按离视线的夹角打分"，
-//      并在日志里写明选中的人、夹角和距离
-//   3. 外观：换模型后游戏会重建角色，立刻设置的衣服容易被冲掉。现在换模型后先等 3 帧再设置，
-//      并在 0.2 秒、0.7 秒、1.2 秒后各校验补设一次，日志里会写明有几个部件不一致
-//   4. 去掉 TGHMod.ini：之前 ini 里有一项为 0 就会让附身/返回时的外观不被保存，现在全部写死在代码里
-//   5. 自动扫描和准星仍默认关闭（v5 灵魂模式第一帧闪退的嫌疑项，原因没有确认）
+// v5 改动：
+//   - T：Niko 原地留下一具尸体，本体隐身；G 选人带准星，锁定目标时准星变绿
+//   - G：抽搐更猛；H 退出时被附身的 NPC 倒地死亡变尸体，Niko 回到按 T 时的位置
+// v3 改动：
+//   - 灵魂模式支持鼠标 / 右摇杆转视角
+//   - G 的选人改为沿视线扫描，近距离也能选中
+//   - 换回 Niko 时恢复他的武器和护甲
+// v2 改动：
+//   1. 灵魂模式新增垂直移动，并且 W/S 沿三维视线方向移动
+//   2. 附身改为"把玩家模型换成目标 NPC 的模型 + 外观，并删除原 NPC"，
+//      所以不会再有"NPC 自己乱走、你什么都做不了"的问题
 // 运行时会在游戏目录写 TGHMod.log，出问题把它发给我。
 
 #include <windows.h>
@@ -40,11 +53,12 @@ using namespace Scripting;                 // ScriptingDirty.h 里直接用了 S
 
 // ---------------- 可调参数 ----------------
 static const u32 CONVULSE_MS    = 1800;   // 抽搐时长
-static const f32 SHAKE_FORCE    = 0.12f;  // 轻微水平扰动，避免把 NPC 打飞
-static const f32 SHAKE_LIFT     = 0.015f; // 极小垂直扰动，避免腾空
-static const f32 SHAKE_SPIN     = 0.10f;  // 轻微随机扭转，模拟抽搐
-static const f32 CAM_JITTER     = 0.045f; // 抽搐时镜头轻微抖动
-static const u32 SHAKE_EVERY_MS = 110;    // 施力间隔
+static const f32 SHAKE_FORCE    = 0.45f;  // 抽搐：来回抽动的水平力（只左右/前后晃，不向上；太弱就加大，太猛就减小）
+static const f32 SHAKE_SPIN     = 0.40f;  // 抽搐：扭转力
+static const u32 TONIC_MS       = 350;    // 开头"强直期"（身体绷紧）时长
+static const f32 CAM_JITTER     = 0.03f;  // 抽搐时镜头轻微抖动（米）
+static const u32 SHAKE_EVERY_MS = 120;    // 抽搐施力间隔：每 120ms 换一次方向 ≈ 每秒 4 次抽动
+static const u32 HINT_SCAN_MS   = 250;    // AutoScan 的扫描间隔
 static const f32 SPIRIT_SPEED   = 0.35f;  // 灵魂镜头每帧移动距离
 static const f32 PICK_RADIUS    = 5.0f;   // 选目标：镜头视线落点附近多少米内找人
 static const f32 FOLLOW_DIST    = 5.0f;   // 附身后镜头距离
@@ -55,24 +69,23 @@ static const f32 STICK_PITCH    = 0.04f;   // 右摇杆上下转速
 static const int STICK_DEADZONE = 24;      // 摇杆死区（0~127）
 static const bool STICK_INVERT_Y = false;  // 右摇杆上下方向反了就改成 true
 static const f32 SCAN_MAX       = 45.0f;   // G 选人：沿视线最远扫描距离
-static const f32 SCAN_STEP      = 2.0f;    // G 选人：沿视线探测的步长（米）
-static const int MOUSE_MAX_JUMP = 500;    // 单帧鼠标位移超过这个值当作"光标跳变"，忽略
+// （MAX_WEAPON_ID / ENABLE_* 已改为 TGHMod.ini 里的运行时开关，见下面 g_* 变量）
 static const int NUM_WEAPON_SLOTS = 50;    // 武器缓存数组大小（>= MAX_WEAPON_ID）
 static const int  CORPSE_PED_TYPE = 4;      // CREATE_CHAR 的人物类型（4 = 平民男性）
 static const int NUM_COMP       = 11;     // 复制外观时处理的部件数（head..face）
 
 static const f32 PI_F = 3.14159265f;
 
-// ---------------- 功能开关（写死在代码里，不再读 ini） ----------------
-static bool g_appearance = true;    // 保存/复制外观部件
-static bool g_corpse     = true;    // T 时在原地生成 Niko 尸体
-static bool g_weapons    = true;    // 保存/恢复武器和护甲
-static bool g_hide       = true;    // T 时让 Niko 隐身并无敌
-static bool g_mouse      = true;    // 鼠标转视角
-static bool g_stick      = true;    // 右摇杆转视角
+// ---------------- 运行时开关（TGHMod.ini） ----------------
+static bool g_appearance = false;   // 保存/复制外观部件
+static bool g_corpse     = false;   // T 时在原地生成 Niko 尸体
+static bool g_weapons    = false;   // 保存/恢复武器和护甲
+static bool g_hide       = false;   // T 时让 Niko 隐身并无敌
+static bool g_mouse      = false;   // 鼠标转视角
+static bool g_stick      = false;   // 右摇杆转视角
 static bool g_crosshair  = false;   // 画准星
 static bool g_scan       = false;   // 灵魂模式下每 150ms 自动扫描目标
-static bool g_verbose    = false;   // 更详细的日志（排查问题时再改成 true）
+static bool g_verbose    = true;    // 更详细的日志
 static int  g_maxWeapon  = 40;      // 保存武器时检查的武器编号上限
 
 // ---------------- 日志 ----------------
@@ -94,105 +107,24 @@ static void LogMsg(const char *fmt, ...)
     fclose(f);
 }
 
-static void LogSettings()
+static void LoadIni()
 {
-    LogMsg("设置: Appearance=%d Corpse=%d Weapons=%d HideNiko=%d MouseLook=%d StickLook=%d Crosshair=%d AutoScan=%d MaxWeaponId=%d",
+    const char *f = ".\\TGHMod.ini";
+    g_appearance = GetPrivateProfileIntA("TGHMod", "Appearance", 0, f) != 0;
+    g_corpse     = GetPrivateProfileIntA("TGHMod", "Corpse",     0, f) != 0;
+    g_weapons    = GetPrivateProfileIntA("TGHMod", "Weapons",    0, f) != 0;
+    g_hide       = GetPrivateProfileIntA("TGHMod", "HideNiko",   0, f) != 0;
+    g_mouse      = GetPrivateProfileIntA("TGHMod", "MouseLook",  0, f) != 0;
+    g_stick      = GetPrivateProfileIntA("TGHMod", "StickLook",  0, f) != 0;
+    g_crosshair  = GetPrivateProfileIntA("TGHMod", "Crosshair",  0, f) != 0;
+    g_scan       = GetPrivateProfileIntA("TGHMod", "AutoScan",   0, f) != 0;
+    g_verbose    = GetPrivateProfileIntA("TGHMod", "Verbose",    1, f) != 0;
+    g_maxWeapon  = (int)GetPrivateProfileIntA("TGHMod", "MaxWeaponId", 40, f);
+    if (g_maxWeapon < 1) g_maxWeapon = 1;
+    if (g_maxWeapon > NUM_WEAPON_SLOTS - 1) g_maxWeapon = NUM_WEAPON_SLOTS - 1;
+    LogMsg("INI: Appearance=%d Corpse=%d Weapons=%d HideNiko=%d MouseLook=%d StickLook=%d Crosshair=%d AutoScan=%d Verbose=%d MaxWeaponId=%d",
            (int)g_appearance, (int)g_corpse, (int)g_weapons, (int)g_hide, (int)g_mouse, (int)g_stick,
-           (int)g_crosshair, (int)g_scan, g_maxWeapon);
-}
-
-// ---------------- 鼠标原始输入（Raw Input） ----------------
-// 在单独的线程里建一个隐藏窗口接收 WM_INPUT，把相对位移累加起来，脚本线程每帧取走。
-// 好处：不依赖光标位置，游戏把光标锁在窗口中心时也能读到鼠标位移。
-#ifndef MOUSE_MOVE_ABSOLUTE
-#define MOUSE_MOVE_ABSOLUTE 0x01
-#endif
-
-static volatile LONG g_rawDX = 0, g_rawDY = 0;   // 累计位移（脚本线程取走后清零）
-static volatile LONG g_rawEvents = 0;            // 收到的鼠标原始输入次数
-static volatile LONG g_rawStarted = 0;           // 线程是否已启动
-static int  g_rawLogLeft = 10;                   // 还要记录几条原始输入日志
-static bool g_rawHaveAbs = false;
-static LONG g_rawAbsX = 0, g_rawAbsY = 0;
-
-static LRESULT CALLBACK RawWndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
-{
-    if (msg == WM_INPUT)
-    {
-        RAWINPUT ri;
-        UINT sz = sizeof(ri);
-        if (GetRawInputData((HRAWINPUT)l, RID_INPUT, &ri, &sz, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
-            ri.header.dwType == RIM_TYPEMOUSE)
-        {
-            LONG dx = ri.data.mouse.lLastX, dy = ri.data.mouse.lLastY;
-            bool absolute = (ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0;
-
-            if (g_rawLogLeft > 0)
-            {
-                g_rawLogLeft--;
-                LogMsg("原始输入: flags=0x%X x=%ld y=%ld %s", (unsigned)ri.data.mouse.usFlags, dx, dy, absolute ? "(绝对坐标)" : "(相对位移)");
-            }
-
-            if (absolute)
-            {
-                // 绝对坐标：用和上一次的差当位移（第一次只记录）
-                LONG ax = dx, ay = dy;
-                if (g_rawHaveAbs) { dx = ax - g_rawAbsX; dy = ay - g_rawAbsY; }
-                else { dx = 0; dy = 0; }
-                g_rawAbsX = ax; g_rawAbsY = ay; g_rawHaveAbs = true;
-            }
-
-            if (dx != 0 || dy != 0)
-            {
-                InterlockedExchangeAdd(&g_rawDX, dx);
-                InterlockedExchangeAdd(&g_rawDY, dy);
-                InterlockedIncrement(&g_rawEvents);
-            }
-        }
-        return DefWindowProcA(h, msg, w, l);     // WM_INPUT 必须交给 DefWindowProc 做清理
-    }
-    return DefWindowProcA(h, msg, w, l);
-}
-
-static DWORD WINAPI RawThread(LPVOID)
-{
-    WNDCLASSA wc;
-    ZeroMemory(&wc, sizeof(wc));
-    wc.lpfnWndProc = RawWndProc;
-    wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "TGHRawInputWnd";
-    RegisterClassA(&wc);
-
-    HWND h = CreateWindowExA(0, wc.lpszClassName, "TGHRaw", WS_POPUP, 0, 0, 1, 1, NULL, NULL, wc.hInstance, NULL);
-    if (!h) { LogMsg("原始输入: 创建窗口失败 err=%lu", (unsigned long)GetLastError()); return 0; }
-
-    RAWINPUTDEVICE rid;
-    rid.usUsagePage = 1;         // 通用桌面设备
-    rid.usUsage = 2;             // 鼠标
-    rid.dwFlags = RIDEV_INPUTSINK;
-    rid.hwndTarget = h;
-    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid)))
-    {
-        LogMsg("原始输入: 注册失败 err=%lu", (unsigned long)GetLastError());
-        return 0;
-    }
-    LogMsg("原始输入: 已注册，等待鼠标输入");
-
-    MSG m;
-    while (GetMessageA(&m, NULL, 0, 0) > 0)
-    {
-        TranslateMessage(&m);
-        DispatchMessageA(&m);
-    }
-    return 0;
-}
-
-static void StartRawInput()
-{
-    if (InterlockedExchange(&g_rawStarted, 1) != 0) return;
-    HANDLE t = CreateThread(NULL, 0, RawThread, NULL, 0, NULL);
-    if (t) CloseHandle(t);
-    else LogMsg("原始输入: 创建线程失败");
+           (int)g_crosshair, (int)g_scan, (int)g_verbose, g_maxWeapon);
 }
 
 // 屏幕左下角提示
@@ -269,13 +201,12 @@ private:
     Ped    m_hint;                       // 当前准星锁定的人
     bool   m_firstSpirit;                // 灵魂模式第一帧（用于逐步日志）
     u32    m_nextScan;
-    f32    m_lastAngle, m_lastDist;      // 最近一次选人：选中者离视线的夹角 / 距离（写日志用）
-    LONG   m_rawSeen;                    // 已处理的原始输入次数
-    u32    m_rawActiveUntil;             // 在这个时刻之前认为原始输入有效，不用光标回中法
-    int    m_applyDV[NUM_COMP];          // 等待补设的外观
-    int    m_applyTV[NUM_COMP];
-    int    m_applyLeft;                  // 还要补设几次
-    u32    m_applyAt;                    // 下次补设的时刻
+
+    u32    m_convulseStart;              // 抽搐开始时间
+    u32    m_shakeIdx;                   // 第几次抽动（用来交替方向）
+    f32    m_axX, m_axY;                 // 这次发作的抽动轴（水平单位向量）
+    bool   m_lastLocked;                 // 上一次扫描是否锁定了目标
+    u32    m_nextHintText;               // 下一次刷新"已锁定"文字的时间
 
     f32 Rand01()
     {
@@ -291,18 +222,13 @@ private:
     // ---- 外观 / 模型 ----
     void SaveComponents(Ped p, int *dv, int *tv)
     {
-        for (int c = 0; c < NUM_COMP; c++) { dv[c] = 0; tv[c] = 0; }
-        if (!g_appearance) { LogMsg("SaveComponents: 已关闭，跳过"); return; }
+        if (!g_appearance) { LogMsg("SaveComponents: 已关闭(Appearance=0)，跳过"); return; }
         for (int c = 0; c < NUM_COMP; c++)
         {
+            if (g_verbose) LogMsg("SaveComponents: 部件 %d", c);
             dv[c] = (int)GetCharDrawableVariation(p, c);
             tv[c] = (int)GetCharTextureVariation(p, c);
         }
-        char buf[200];
-        int n = 0;
-        for (int c = 0; c < NUM_COMP && n < 180; c++)
-            n += sprintf(buf + n, "%d/%d ", dv[c], tv[c]);
-        LogMsg("外观已读取 ped=%d（部件 款式/贴图）: %s", (int)p, buf);
     }
 
     void ApplyComponents(Ped p, const int *dv, const int *tv)
@@ -310,49 +236,6 @@ private:
         if (!g_appearance) return;
         for (int c = 0; c < NUM_COMP; c++)
             SetCharComponentVariation(p, c, (u32)dv[c], (u32)tv[c]);
-    }
-
-    // 读回来对比，返回不一致的部件数
-    int CountMismatch(Ped p, const int *dv, const int *tv)
-    {
-        int bad = 0;
-        for (int c = 0; c < NUM_COMP; c++)
-        {
-            int d = (int)GetCharDrawableVariation(p, c);
-            int t = (int)GetCharTextureVariation(p, c);
-            if (d != dv[c] || t != tv[c]) bad++;
-        }
-        return bad;
-    }
-
-    // 换模型后游戏会重建角色，立刻设置的外观容易被冲掉：先设置一次，再安排之后补设几次
-    void ScheduleAppearance(Ped p, const int *dv, const int *tv)
-    {
-        if (!g_appearance) return;
-        for (int i = 0; i < NUM_COMP; i++) { m_applyDV[i] = dv[i]; m_applyTV[i] = tv[i]; }
-        ApplyComponents(p, dv, tv);
-        LogMsg("外观首次设置后不一致部件数: %d", CountMismatch(p, dv, tv));
-        m_applyLeft = 3;
-        m_applyAt = GetTickCount() + 200;
-    }
-
-    void ProcessAppearance()
-    {
-        if (m_applyLeft <= 0) return;
-        u32 now = GetTickCount();
-        if ((i32)(now - m_applyAt) < 0) return;
-
-        Ped p = 0;
-        m_player = ConvertIntToPlayerIndex(GetPlayerId());
-        GetPlayerChar(m_player, &p);
-        if (p != 0 && DoesCharExist(p))
-        {
-            int before = CountMismatch(p, m_applyDV, m_applyTV);
-            if (before != 0) ApplyComponents(p, m_applyDV, m_applyTV);
-            LogMsg("外观补设检查（剩余 %d 次）：补设前不一致 %d 个", m_applyLeft, before);
-        }
-        m_applyLeft--;
-        m_applyAt = now + (m_applyLeft == 2 ? 500 : 500);
     }
 
     bool LoadModelWait(eModel model)
@@ -424,7 +307,6 @@ private:
             Wait(0);
         }
         ChangePlayerModel(m_player, model);
-        for (int i = 0; i < 3; i++) Wait(0);     // 等游戏把新角色建好，再设置外观才不会被冲掉
         Ped p = 0;
         GetPlayerChar(m_player, &p);     // 句柄可能变化，重新取
         if (p != 0) m_niko = p;
@@ -468,70 +350,51 @@ private:
     }
 
     // ---- 鼠标 / 右摇杆转视角（灵魂模式） ----
-    // 方式二（备用）：每帧读光标相对窗口中心的位移，再把光标拉回中心
-    void LookMouseCursor()
-    {
-        HWND h = GetForegroundWindow();
-        if (!h || !GameFocused()) { m_mouseInit = false; return; }
-
-        RECT rc;
-        if (!GetClientRect(h, &rc)) return;
-        POINT o; o.x = 0; o.y = 0;
-        ClientToScreen(h, &o);
-        int cx = o.x + rc.right / 2;
-        int cy = o.y + rc.bottom / 2;
-
-        POINT p;
-        if (!GetCursorPos(&p)) return;
-
-        if (!m_mouseInit)
-        {
-            SetCursorPos(cx, cy);
-            m_mouseInit = true;
-            return;
-        }
-
-        int dx = p.x - cx, dy = p.y - cy;
-        if (dx == 0 && dy == 0) return;
-
-        if (dx > -MOUSE_MAX_JUMP && dx < MOUSE_MAX_JUMP && dy > -MOUSE_MAX_JUMP && dy < MOUSE_MAX_JUMP)
-        {
-            m_yaw   -= (f32)dx * MOUSE_SENS;
-            m_pitch -= (f32)dy * MOUSE_SENS;
-            static int s_cl = 0;
-            if (s_cl < 6) { LogMsg("光标回中法: dx=%d dy=%d", dx, dy); s_cl++; }
-        }
-        SetCursorPos(cx, cy);
-    }
-
     void LookInput()
     {
-        if (m_firstLook) LogMsg("LookInput 首帧开始");
+        if (m_firstLook) { LogMsg("LookInput 首帧开始"); }
 
         if (g_mouse)
         {
-            u32 now = GetTickCount();
-
-            // 方式一：原始输入（不依赖光标位置）
-            LONG rdx = InterlockedExchange(&g_rawDX, 0);
-            LONG rdy = InterlockedExchange(&g_rawDY, 0);
-            LONG ev = g_rawEvents;
-            if (ev != m_rawSeen) { m_rawSeen = ev; m_rawActiveUntil = now + 1500; }
-
-            if (rdx != 0 || rdy != 0)
+            HWND h = GetForegroundWindow();
+            if (h && GameFocused())
             {
-                if (rdx > -MOUSE_MAX_JUMP && rdx < MOUSE_MAX_JUMP && rdy > -MOUSE_MAX_JUMP && rdy < MOUSE_MAX_JUMP)
+                POINT p;
+                if (GetCursorPos(&p))
                 {
-                    m_yaw   -= (f32)rdx * MOUSE_SENS;
-                    m_pitch -= (f32)rdy * MOUSE_SENS;
+                    if (m_mouseInit)
+                    {
+                        int dx = p.x - m_lastX, dy = p.y - m_lastY;
+                        if (dx > -300 && dx < 300 && dy > -300 && dy < 300)
+                        {
+                            m_yaw   -= dx * MOUSE_SENS;
+                            m_pitch -= dy * MOUSE_SENS;
+                        }
+                    }
+                    m_lastX = p.x; m_lastY = p.y;
+                    m_mouseInit = true;
+
+                    // 光标靠近窗口边缘时才拉回中心（不再每帧调用 SetCursorPos）
+                    RECT rc;
+                    if (GetClientRect(h, &rc))
+                    {
+                        POINT o; o.x = 0; o.y = 0;
+                        ClientToScreen(h, &o);
+                        int w = rc.right, hh = rc.bottom;
+                        if (p.x < o.x + 80 || p.x > o.x + w - 80 || p.y < o.y + 80 || p.y > o.y + hh - 80)
+                        {
+                            SetCursorPos(o.x + w / 2, o.y + hh / 2);
+                            m_lastX = o.x + w / 2; m_lastY = o.y + hh / 2;
+                        }
+                    }
                 }
             }
-            else if ((i32)(now - m_rawActiveUntil) >= 0)
+            else
             {
-                LookMouseCursor();       // 原始输入最近没有数据，才用光标回中法
+                m_mouseInit = false;
             }
         }
-        if (m_firstLook) LogMsg("LookInput 鼠标部分完成");
+        if (m_firstLook) { LogMsg("LookInput 鼠标部分完成"); }
 
         if (g_stick)
         {
@@ -539,16 +402,14 @@ private:
             GetPositionOfAnalogueSticks(0, &lx, &ly, &rx, &ry);
             int sx = (int)(i32)rx, sy = (int)(i32)ry;
             static int s_logged = 0;
-            if ((sx > STICK_DEADZONE || sx < -STICK_DEADZONE ||
-                 sy > STICK_DEADZONE || sy < -STICK_DEADZONE) && s_logged < 5)
+            if ((sx > STICK_DEADZONE || sx < -STICK_DEADZONE || sy > STICK_DEADZONE || sy < -STICK_DEADZONE) && s_logged < 5)
             {
                 LogMsg("右摇杆读数 x=%d y=%d", sx, sy);
                 s_logged++;
             }
             if (sx >= -127 && sx <= 127 && sy >= -127 && sy <= 127)
             {
-                if (sx > STICK_DEADZONE || sx < -STICK_DEADZONE)
-                    m_yaw -= (sx / 127.0f) * STICK_YAW;
+                if (sx > STICK_DEADZONE || sx < -STICK_DEADZONE) m_yaw -= (sx / 127.0f) * STICK_YAW;
                 if (sy > STICK_DEADZONE || sy < -STICK_DEADZONE)
                 {
                     f32 k = (sy / 127.0f) * STICK_PITCH;
@@ -556,11 +417,10 @@ private:
                 }
             }
         }
+        if (m_firstLook) { LogMsg("LookInput 摇杆部分完成"); m_firstLook = false; }
 
         if (m_pitch > 1.4f) m_pitch = 1.4f;
         if (m_pitch < -1.4f) m_pitch = -1.4f;
-
-        if (m_firstLook) { LogMsg("LookInput 完成"); m_firstLook = false; }
     }
 
     // 把玩家换回 Niko 的模型和外观
@@ -569,7 +429,7 @@ private:
         m_player = ConvertIntToPlayerIndex(GetPlayerId());
         if (SwapPlayerModel(m_nikoModel))
         {
-            ScheduleAppearance(m_niko, m_nikoDV, m_nikoTV);
+            ApplyComponents(m_niko, m_nikoDV, m_nikoTV);
             if (withWeapons) RestoreWeapons();
         }
         else
@@ -682,14 +542,6 @@ private:
         LogMsg("SpiritOn: 武器已保存");
         m_mouseInit = false;
         m_firstLook = true;
-        if (g_mouse)
-        {
-            StartRawInput();
-            InterlockedExchange(&g_rawDX, 0);      // 清掉进入灵魂模式之前累积的鼠标位移，避免一进来就乱转
-            InterlockedExchange(&g_rawDY, 0);
-            m_rawSeen = g_rawEvents;
-            m_rawActiveUntil = 0;
-        }
 
         m_yaw = h * PI_F / 180.0f;
         m_pitch = -0.35f;
@@ -725,10 +577,12 @@ private:
         LogMsg("SpiritOn: CamStart 完成");
         m_hint = 0;
         m_nextScan = 0;
+        m_lastLocked = false;
+        m_nextHintText = 0;
 
         m_mode = MODE_SPIRIT;
         LogMsg("灵魂出窍 niko=%d pos=%.1f,%.1f,%.1f", (int)m_niko, x, y, z);
-        ShowText("TGH: spirit mode - crosshair turns green on a target, press G. H to return.", 4500);
+        ShowText("TGH: spirit mode - aim at a person, press G. H to return.", 4500);
     }
 
     void UpdateSpirit()
@@ -765,9 +619,18 @@ private:
         {
             if (fl) LogMsg("UpdateSpirit 首帧: FindTarget");
             Ped t = 0;
-            m_hint = FindTarget(&t) ? t : 0;
-            m_nextScan = now + 150;
+            m_hint = FindTarget(&t, true) ? t : 0;
+            m_nextScan = now + HINT_SCAN_MS;
             if (fl) LogMsg("UpdateSpirit 首帧: FindTarget 完成");
+
+            // 文字提示：状态变化时显示，锁定期间每秒刷新一次（不依赖准星是否画得出来）
+            bool locked = (m_hint != 0);
+            if (locked != m_lastLocked || (locked && (i32)(now - m_nextHintText) >= 0))
+            {
+                ShowText(locked ? "TGH: TARGET LOCKED - press G" : "TGH: no target in sight", 1200);
+                m_lastLocked = locked;
+                m_nextHintText = now + 1000;
+            }
         }
         if (g_crosshair)
         {
@@ -799,119 +662,150 @@ private:
         return c != 0 && c != m_niko && c != m_nikoCorpse && Alive(c) && !IsCharInAnyCar(c);
     }
 
-    // 重置搜索条件后再找最近的人。不先 Begin/End，GET_CLOSEST_CHAR 会漏掉很多路人
-    // （ScriptHookDotNet 里的 GetClosestPed 也是这样调用的，参数也是 true, true）
-    Ped ClosestPedAt(f32 x, f32 y, f32 z, f32 rad)
+    void ScoreCandidate(Ped c, const Ray &r, Ped *best, f32 *bestScore)
     {
-        Ped c = 0;
-        BeginCharSearchCriteria();
-        EndCharSearchCriteria();
-        GetClosestChar(x, y, z, rad, true, true, &c);
-        return c;
-    }
-
-    static const int MAX_CAND = 64;
-
-    void AddCand(Ped *list, int *n, Ped c)
-    {
-        if (c == 0 || *n >= MAX_CAND) return;
-        for (int i = 0; i < *n; i++) if (list[i] == c) return;
-        list[(*n)++] = c;
-    }
-
-    // 沿视线、视线落点附近多处探测，把找到的人都收集起来
-    void GatherCandidates(const Ray &r, Ped *list, int *n)
-    {
-        *n = 0;
-        static const f32 off[4][2] = { { 1.5f, 0.0f }, { -1.5f, 0.0f }, { 0.0f, 1.5f }, { 0.0f, -1.5f } };
-
-        for (f32 t = 2.0f; t <= SCAN_MAX + 0.01f; t += SCAN_STEP)
-        {
-            f32 px = r.cx + r.dx * t, py = r.cy + r.dy * t, pz = r.cz + r.dz * t;
-            Ped c = ClosestPedAt(px, py, pz, 2.0f + t * 0.12f);
-            AddCand(list, n, c);
-
-            // 最近的是"不能选的"（Niko / 尸体 / 死人 / 车里的人）时，在四周再探一圈
-            if (c != 0 && !ValidTarget(c) && t <= 16.0f)
-            {
-                for (int k = 0; k < 4; k++)
-                    AddCand(list, n, ClosestPedAt(px + off[k][0], py + off[k][1], pz, 1.5f));
-            }
-        }
-
-        if (r.hasG)
-        {
-            AddCand(list, n, ClosestPedAt(r.gx, r.gy, r.gz, 5.0f));
-            for (int k = 0; k < 4; k++)
-                AddCand(list, n, ClosestPedAt(r.gx + off[k][0] * 2.0f, r.gy + off[k][1] * 2.0f, r.gz, 3.0f));
-        }
-    }
-
-    // 按"离视线的夹角"打分，越小越好；视线落点附近的人也算
-    void Consider(Ped c, const Ray &r, f32 maxAngleDeg, f32 maxGround, Ped *best, f32 *bestScore)
-    {
-        if (!ValidTarget(c)) return;
-
         f32 px, py, pz;
         GetCharCoordinates(c, &px, &py, &pz);
         f32 vx = px - r.cx, vy = py - r.cy, vz = pz - r.cz;
-        f32 dist = sqrtf(vx * vx + vy * vy + vz * vz);
-        if (dist < 0.4f) return;
-
-        f32 cosA = (vx * r.dx + vy * r.dy + vz * r.dz) / dist;
-        if (cosA > 1.0f) cosA = 1.0f;
-        if (cosA < -1.0f) cosA = -1.0f;
-        f32 angle = acosf(cosA) * 180.0f / PI_F;
+        f32 along = vx * r.dx + vy * r.dy + vz * r.dz;
+        f32 d2 = vx * vx + vy * vy + vz * vz;
+        f32 perp2 = d2 - along * along;
+        f32 perp = perp2 > 0.0f ? sqrtf(perp2) : 0.0f;
 
         f32 score = 1e9f;
-        if (angle <= maxAngleDeg) score = angle + dist * 0.05f;
-
+        if (along > 0.3f && perp <= 1.2f + along * 0.10f)
+            score = perp + along * 0.01f;                       // 离视线越近越好，同样近则选更近的
         if (r.hasG)
         {
             f32 ex = px - r.gx, ey = py - r.gy, ez = pz - r.gz;
             f32 gd = sqrtf(ex * ex + ey * ey + ez * ez);
-            if (gd <= maxGround)
-            {
-                f32 s = 5.0f + gd + dist * 0.02f;
-                if (s < score) score = s;
-            }
+            if (gd <= PICK_RADIUS && gd + 0.5f < score) score = gd + 0.5f;   // 视线落点附近（优先级略低）
         }
-        if (score < *bestScore) { *bestScore = score; *best = c; m_lastAngle = angle; m_lastDist = dist; }
+        if (score < *bestScore) { *bestScore = score; *best = c; }
     }
 
-    bool FindTarget(Ped *out)
+    // 在一个点附近找人；如果最近的是"不能选的"（Niko/尸体/死人/车里的人），就在四周再探测一圈
+    void Probe(f32 sx, f32 sy, f32 sz, f32 rad, const Ray &r, Ped *best, f32 *bestScore, bool retry)
     {
-        Ray r;
-        r.cx = m_camX; r.cy = m_camY; r.cz = m_camZ;
-        CamDir(&r.dx, &r.dy, &r.dz);
-        r.hasG = false; r.gx = r.gy = r.gz = 0.0f;
-        if (r.dz < -0.05f)
+        Ped c = 0;
+        GetClosestChar(sx, sy, sz, rad, true, false, &c);
+        if (c == 0) return;
+        if (ValidTarget(c)) { ScoreCandidate(c, r, best, bestScore); return; }
+        if (!retry) return;
+
+        static const f32 off[4][2] = { { 1.3f, 0.0f }, { -1.3f, 0.0f }, { 0.0f, 1.3f }, { 0.0f, -1.3f } };
+        for (int k = 0; k < 4; k++)
         {
-            f32 t = (m_camZ - m_groundZ) / (-r.dz);
+            Ped c2 = 0;
+            GetClosestChar(sx + off[k][0], sy + off[k][1], sz, 1.0f, true, false, &c2);
+            if (ValidTarget(c2)) ScoreCandidate(c2, r, best, bestScore);
+        }
+    }
+
+    void MakeRay(Ray *r)
+    {
+        r->cx = m_camX; r->cy = m_camY; r->cz = m_camZ;
+        CamDir(&r->dx, &r->dy, &r->dz);
+        r->hasG = false; r->gx = r->gy = r->gz = 0.0f;
+        if (r->dz < -0.05f)
+        {
+            f32 t = (m_camZ - m_groundZ) / (-r->dz);
             if (t < 1.0f) t = 1.0f;
             if (t > SCAN_MAX) t = SCAN_MAX;
-            r.gx = m_camX + r.dx * t; r.gy = m_camY + r.dy * t; r.gz = m_camZ + r.dz * t;
-            r.hasG = true;
+            r->gx = m_camX + r->dx * t; r->gy = m_camY + r->dy * t; r->gz = m_camZ + r->dz * t;
+            r->hasG = true;
         }
+    }
 
-        Ped cand[MAX_CAND];
-        int n = 0;
-        GatherCandidates(r, cand, &n);
+    // 按"视线夹角"找人：在视线上取几个大半径点，返回夹角最小（且 < maxAng 弧度）的人
+    Ped FindByAngle(const Ray &r, f32 maxAng, f32 *angOut, f32 *distOut)
+    {
+        static const f32 lt[8] = { 3.0f, 5.0f, 8.0f, 12.0f, 17.0f, 24.0f, 32.0f, 44.0f };
+        Ped best = 0;
+        f32 bestAng = maxAng;
+        for (int k = 0; k < 8; k++)
+        {
+            f32 d = lt[k];
+            Ped c = 0;
+            GetClosestChar(r.cx + r.dx * d, r.cy + r.dy * d, r.cz + r.dz * d, 0.5f * d + 2.0f, true, false, &c);
+            if (!ValidTarget(c)) continue;
+            f32 px, py, pz;
+            GetCharCoordinates(c, &px, &py, &pz);
+            f32 vx = px - r.cx, vy = py - r.cy, vz = pz - r.cz;
+            f32 along = vx * r.dx + vy * r.dy + vz * r.dz;
+            if (along < 0.3f) continue;
+            f32 d2 = vx * vx + vy * vy + vz * vz;
+            f32 perp2 = d2 - along * along;
+            f32 perp = perp2 > 0.0f ? sqrtf(perp2) : 0.0f;
+            f32 ang = atan2f(perp, along);
+            if (ang < bestAng)
+            {
+                bestAng = ang; best = c;
+                if (angOut) *angOut = ang;
+                if (distOut) *distOut = sqrtf(d2);
+            }
+        }
+        return best;
+    }
+
+    // quick=true：AutoScan 用的轻量扫描；quick=false：按 G 时的完整扫描
+    bool FindTarget(Ped *out, bool quick)
+    {
+        Ray r;
+        MakeRay(&r);
 
         Ped best = 0;
         f32 bestScore = 1e9f;
 
-        // 先严格：夹角 10° 以内，或落在视线落点 3 米内
-        for (int i = 0; i < n; i++) Consider(cand[i], r, 10.0f, 3.0f, &best, &bestScore);
-        // 找不到再放宽：夹角 24° 以内，或落在视线落点 7 米内
-        if (best == 0)
-            for (int i = 0; i < n; i++) Consider(cand[i], r, 24.0f, 7.0f, &best, &bestScore);
+        // 沿视线分三段取样：近处密、半径小（不会被别人抢走），远处稀、半径大
+        f32 t = 0.8f;
+        while (t <= SCAN_MAX)
+        {
+            f32 step, rad;
+            if (t <= 10.0f)      { step = quick ? 1.5f : 0.6f; rad = quick ? 1.6f : 1.1f; }
+            else if (t <= 25.0f) { step = quick ? 2.5f : 1.0f; rad = quick ? 2.4f : 1.6f; }
+            else                 { step = quick ? 4.0f : 1.5f; rad = quick ? 3.5f : 2.2f; }
+            Probe(r.cx + r.dx * t, r.cy + r.dy * t, r.cz + r.dz * t, rad, r, &best, &bestScore, (!quick) && t <= 15.0f);
+            t += step;
+        }
 
-        if (!g_scan || g_verbose)
-            LogMsg("FindTarget: 候选 %d 个，选中 ped=%d 夹角=%.1f° 距离=%.1f 米", n, (int)best, best != 0 ? m_lastAngle : 0.0f, best != 0 ? m_lastDist : 0.0f);
+        if (r.hasG)
+            Probe(r.gx, r.gy, r.gz, 4.0f, r, &best, &bestScore, !quick);
+
+        // 兜底（只在按 G 时）：严格判定没找到，就选视线夹角最小的人（约 26 度以内）
+        if (best == 0 && !quick)
+            best = FindByAngle(r, 0.45f, NULL, NULL);
+
         if (best == 0) return false;
         *out = best;
         return true;
+    }
+
+    // 没找到目标时：告诉玩家最近的人在哪个方向
+    void DescribeNearest(char *buf)
+    {
+        Ray r;
+        MakeRay(&r);
+        f32 ang = 0.0f, dist = 0.0f;
+        Ped c = FindByAngle(r, 3.2f, &ang, &dist);
+        if (c == 0)
+        {
+            sprintf(buf, "TGH: no target. No person found within %d m ahead.", (int)SCAN_MAX);
+            return;
+        }
+        f32 px, py, pz;
+        GetCharCoordinates(c, &px, &py, &pz);
+        f32 dx = px - r.cx, dy = py - r.cy, dz = pz - r.cz;
+        f32 pedYaw = atan2f(-dx, dy);                    // 与 m_yaw 同一个约定：yaw 增大 = 向左转
+        f32 d = pedYaw - m_yaw;
+        while (d > PI_F)  d -= 2.0f * PI_F;
+        while (d < -PI_F) d += 2.0f * PI_F;
+        f32 hor = sqrtf(dx * dx + dy * dy);
+        f32 el = atan2f(dz, hor) - m_pitch;              // >0 = 需要向上看
+        int yawDeg = (int)(fabsf(d) * 180.0f / PI_F + 0.5f);
+        int pitDeg = (int)(fabsf(el) * 180.0f / PI_F + 0.5f);
+        sprintf(buf, "TGH: no target. Nearest person %d m away: turn %s %d deg, look %s %d deg.",
+                (int)(dist + 0.5f), d > 0.0f ? "left" : "right", yawDeg, el > 0.0f ? "up" : "down", pitDeg);
     }
 
     void Possess()
@@ -919,17 +813,15 @@ private:
         if (m_mode != MODE_SPIRIT) return;
 
         Ped t = 0;
-
-        // G 时永远重新扫描一次，避免 150ms 自动锁定的旧句柄/旧目标干扰。
-        // 如果准星目标仍然有效且就在视线中，FindTarget 会再次确认它。
-        if (!FindTarget(&t))
+        if (!FindTarget(&t, false))
         {
-            if (m_hint != 0 && ValidTarget(m_hint))
-                t = m_hint;
+            if (m_hint != 0 && ValidTarget(m_hint)) t = m_hint;   // 完整扫描没找到，就用刚才锁定的人
             else
             {
-                ShowText("TGH: no target. Aim the camera at a person.", 2500);
-                LogMsg("Possess: 没找到目标");
+                char msg[200];
+                DescribeNearest(msg);
+                ShowText(msg, 3500);
+                LogMsg("Possess: 没找到目标 | %s", msg);
                 return;
             }
         }
@@ -940,8 +832,13 @@ private:
         SetBlockingOfNonTemporaryEvents(m_target, true);
         SwitchPedToRagdoll(m_target, 10000, CONVULSE_MS, 0, 1, 1, 0);
 
-        m_convulseEnd = GetTickCount() + CONVULSE_MS;
-        m_nextShake = GetTickCount();
+        u32 now = GetTickCount();
+        m_convulseStart = now;
+        m_convulseEnd = now + CONVULSE_MS;
+        m_nextShake = now;
+        m_shakeIdx = 0;
+        f32 ang = Rand01() * 2.0f * PI_F;                      // 这次发作的抽动方向
+        m_axX = cosf(ang); m_axY = sinf(ang);
         m_mode = MODE_CONVULSE;
         LogMsg("附身目标 ped=%d，开始抽搐 %u ms", (int)m_target, (unsigned)CONVULSE_MS);
     }
@@ -955,22 +852,36 @@ private:
         u32 now = GetTickCount();
         if ((i32)(now - m_nextShake) >= 0)
         {
-            // 初始 Ragdoll 已经负责“倒地”。
-            // 这里绝不反复重置 Ragdoll，否则 GTA IV 会不断重新接管物理，
-            // 很容易出现“被弹飞 / 落地掉血”的情况。
-            // 只有它意外恢复站立时才重新进入 Ragdoll。
-            if (!IsPedRagdoll(m_target))
+            if (!IsPedRagdoll(m_target))           // 如果中途站起来了，再摔回去
                 SwitchPedToRagdoll(m_target, 10000, CONVULSE_MS, 0, 1, 1, 0);
 
-            // 极小的横向扰动 + 极小扭转，模拟抽搐而不是“爆炸式击飞”。
-            f32 fx = (Rand01() - 0.5f) * 2.0f * SHAKE_FORCE;
-            f32 fy = (Rand01() - 0.5f) * 2.0f * SHAKE_FORCE;
-            f32 fz = (Rand01() - 0.5f) * 2.0f * SHAKE_LIFT;
-            f32 sx = (Rand01() - 0.5f) * 2.0f * SHAKE_SPIN;
-            f32 sy = (Rand01() - 0.5f) * 2.0f * SHAKE_SPIN;
-            f32 sz = (Rand01() - 0.5f) * 2.0f * SHAKE_SPIN;
-            ApplyForceToPed(m_target, 3, fx, fy, fz, sx, sy, sz, 0, 0, 1, 1);
-            m_nextShake = now + SHAKE_EVERY_MS;
+            u32 el = now - m_convulseStart;
+            f32 prog = (f32)el / (f32)CONVULSE_MS;
+            if (prog > 1.0f) prog = 1.0f;
+
+            f32 fx, fy, sx, sy, sz;
+            if (el < TONIC_MS)
+            {
+                // 强直期：身体绷紧，只有很小的同向力
+                fx = m_axX * SHAKE_FORCE * 0.25f;
+                fy = m_axY * SHAKE_FORCE * 0.25f;
+                sx = 0.0f; sy = 0.0f; sz = SHAKE_SPIN * 0.2f;
+            }
+            else
+            {
+                // 阵挛期：约 4 次/秒，方向来回交替，幅度逐渐减弱；不施加向上的力
+                f32 decay = 1.0f - 0.45f * prog;
+                f32 sign = (m_shakeIdx & 1u) ? 1.0f : -1.0f;
+                f32 amp = SHAKE_FORCE * decay * (0.85f + 0.30f * Rand01());
+                fx = m_axX * amp * sign;
+                fy = m_axY * amp * sign;
+                sx = (Rand01() - 0.5f) * SHAKE_SPIN * 0.5f * decay;
+                sy = (Rand01() - 0.5f) * SHAKE_SPIN * 0.5f * decay;
+                sz = sign * SHAKE_SPIN * decay * (0.7f + 0.3f * Rand01());
+            }
+            ApplyForceToPed(m_target, 3, fx, fy, 0.0f, sx, sy, sz, 0, 0, 1, 1);
+            m_shakeIdx++;
+            m_nextShake = now + (el < TONIC_MS ? 80u : SHAKE_EVERY_MS);
         }
 
         if ((i32)(now - m_convulseEnd) >= 0)
@@ -1006,7 +917,7 @@ private:
             return;
         }
 
-        ScheduleAppearance(m_niko, dv, tv);
+        ApplyComponents(m_niko, dv, tv);
         SetCharVisible(m_niko, true);
         SetCharInvincible(m_niko, false);
         DeleteChar(&m_target);               // 删掉原 NPC，避免出现两个人
@@ -1109,8 +1020,8 @@ private:
 protected:
     virtual void RunScript()
     {
-        LogMsg("TGHMod v8 脚本线程启动");
-        LogSettings();
+        LogMsg("TGHMod v6 脚本线程启动");
+        LoadIni();
         ShowText("TGHMod loaded. T = spirit, G = possess, H = return.", 5000);
 
         for (;;)
@@ -1118,8 +1029,6 @@ protected:
             bool pT = Pressed('T');
             bool pG = Pressed('G');
             bool pH = Pressed('H');
-
-            ProcessAppearance();
 
             if (m_needRestore)
             {
@@ -1154,11 +1063,11 @@ public:
           m_nikoModel(0), m_needRestore(false),
           m_mouseInit(false), m_lastX(0), m_lastY(0), m_firstLook(true), m_wCount(0), m_wCur(0), m_nikoArmour(0),
           m_nikoCorpse(0), m_cX(0), m_cY(0), m_cZ(0), m_cH(0), m_possModel(0), m_hint(0), m_firstSpirit(false), m_nextScan(0),
-          m_lastAngle(0), m_lastDist(0), m_rawSeen(0), m_rawActiveUntil(0), m_applyLeft(0), m_applyAt(0)
+          m_convulseStart(0), m_shakeIdx(0), m_axX(1.0f), m_axY(0.0f), m_lastLocked(false), m_nextHintText(0)
     {
         for (int i = 0; i < NUM_COMP; i++) { m_possDV[i] = 0; m_possTV[i] = 0; }
         for (int i = 0; i < NUM_WEAPON_SLOTS; i++) { m_wList[i] = 0; m_wAmmo[i] = 0; }
-        for (int i = 0; i < NUM_COMP; i++) { m_nikoDV[i] = 0; m_nikoTV[i] = 0; m_applyDV[i] = 0; m_applyTV[i] = 0; }
+        for (int i = 0; i < NUM_COMP; i++) { m_nikoDV[i] = 0; m_nikoTV[i] = 0; }
         SetName("TGHMod");
     }
 };
