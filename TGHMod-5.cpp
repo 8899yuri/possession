@@ -5,6 +5,12 @@
 //          没有 TGHMod.ini 时，所有高风险功能默认关闭（行为接近旧版）。
 //          日志（TGHMod.log）里会写明读到的开关值，并在每一步之前先写一行。
 //
+// v8 改动（在能用的 v7 上只加这些）：
+//   1. T 之后屏幕正中央显示一个小白点（带细黑边）。G 就是附身白点下面的人：
+//      有白点时选人判定收紧到"准星正下方"，不再按宽松夹角乱选别人。
+//      白点用 ini 的 AimDot 控制（没写这一项就是开；AimDot=0 关闭），并且带异常保护：
+//      绘制出异常会自动关掉白点并写日志，不会让游戏闪退。
+//   2. H 返回时，Niko 一律回到按 T 时的位置（原来只在尸体还存在时才传送回去）。
 // v7 改动（只改 ini 解决不了的部分，鼠标/外观/开关逻辑保持 v6 不变）：
 //   1. G 选人：沿视线分近/中/远三段取样，近处密、半径小，避免被旁边的人/尸体抢走；
 //      严格判定没找到时，再按"视线夹角"宽松兜底（约 26 度以内）。
@@ -83,7 +89,7 @@ static bool g_weapons    = false;   // 保存/恢复武器和护甲
 static bool g_hide       = false;   // T 时让 Niko 隐身并无敌
 static bool g_mouse      = false;   // 鼠标转视角
 static bool g_stick      = false;   // 右摇杆转视角
-static bool g_crosshair  = false;   // 画准星
+static bool g_crosshair  = true;    // 画中心小白点（ini 里的 AimDot）
 static bool g_scan       = false;   // 灵魂模式下每 150ms 自动扫描目标
 static bool g_verbose    = true;    // 更详细的日志
 static int  g_maxWeapon  = 40;      // 保存武器时检查的武器编号上限
@@ -107,6 +113,27 @@ static void LogMsg(const char *fmt, ...)
     fclose(f);
 }
 
+// ---------------- 中心小白点（带异常保护） ----------------
+static bool g_dotFailed = false;
+
+static void DrawDotRaw(u32 r, u32 g, u32 b)
+{
+    // 先画一个稍大的半透明黑点当边，再画白点（DRAW_RECT：中心 x,y 与宽高，均为 0~1 的屏幕比例）
+    NativeInvoke::Invoke<ScriptVoid>("DRAW_RECT", 0.5f, 0.5f, 0.0052f, 0.0092f, 0u, 0u, 0u, 170u);
+    NativeInvoke::Invoke<ScriptVoid>("DRAW_RECT", 0.5f, 0.5f, 0.0032f, 0.0057f, r, g, b, 240u);
+}
+
+static bool DrawDotSafe(u32 r, u32 g, u32 b)
+{
+#ifdef _MSC_VER
+    __try { DrawDotRaw(r, g, b); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+#else
+    DrawDotRaw(r, g, b);
+    return true;
+#endif
+}
+
 static void LoadIni()
 {
     const char *f = ".\\TGHMod.ini";
@@ -116,13 +143,13 @@ static void LoadIni()
     g_hide       = GetPrivateProfileIntA("TGHMod", "HideNiko",   0, f) != 0;
     g_mouse      = GetPrivateProfileIntA("TGHMod", "MouseLook",  0, f) != 0;
     g_stick      = GetPrivateProfileIntA("TGHMod", "StickLook",  0, f) != 0;
-    g_crosshair  = GetPrivateProfileIntA("TGHMod", "Crosshair",  0, f) != 0;
+    g_crosshair  = GetPrivateProfileIntA("TGHMod", "AimDot",     1, f) != 0;   // 中心小白点，没写这项就是开
     g_scan       = GetPrivateProfileIntA("TGHMod", "AutoScan",   0, f) != 0;
     g_verbose    = GetPrivateProfileIntA("TGHMod", "Verbose",    1, f) != 0;
     g_maxWeapon  = (int)GetPrivateProfileIntA("TGHMod", "MaxWeaponId", 40, f);
     if (g_maxWeapon < 1) g_maxWeapon = 1;
     if (g_maxWeapon > NUM_WEAPON_SLOTS - 1) g_maxWeapon = NUM_WEAPON_SLOTS - 1;
-    LogMsg("INI: Appearance=%d Corpse=%d Weapons=%d HideNiko=%d MouseLook=%d StickLook=%d Crosshair=%d AutoScan=%d Verbose=%d MaxWeaponId=%d",
+    LogMsg("INI: Appearance=%d Corpse=%d Weapons=%d HideNiko=%d MouseLook=%d StickLook=%d AimDot=%d AutoScan=%d Verbose=%d MaxWeaponId=%d",
            (int)g_appearance, (int)g_corpse, (int)g_weapons, (int)g_hide, (int)g_mouse, (int)g_stick,
            (int)g_crosshair, (int)g_scan, (int)g_verbose, g_maxWeapon);
 }
@@ -582,7 +609,7 @@ private:
 
         m_mode = MODE_SPIRIT;
         LogMsg("灵魂出窍 niko=%d pos=%.1f,%.1f,%.1f", (int)m_niko, x, y, z);
-        ShowText("TGH: spirit mode - aim at a person, press G. H to return.", 4500);
+        ShowText(g_crosshair ? "TGH: spirit mode - put the white dot on a person, press G. H to return." : "TGH: spirit mode - aim at a person, press G. H to return.", 4500);
     }
 
     void UpdateSpirit()
@@ -643,10 +670,13 @@ private:
 
     void DrawCrosshair(bool locked)
     {
-        u8 r = locked ? 60 : 255, g = 255, b = locked ? 60 : 255;
-        DrawRect(0.5f, 0.5f, 0.0030f, 0.0055f, r, g, b, 235);     // 中心点
-        DrawRect(0.5f, 0.5f, 0.0140f, 0.0020f, r, g, b, 200);     // 横线
-        DrawRect(0.5f, 0.5f, 0.0016f, 0.0250f, r, g, b, 200);     // 竖线
+        if (g_dotFailed) return;
+        u32 r = locked ? 60u : 255u, g = 255u, b = locked ? 60u : 255u;   // 平时白色；AutoScan 开启且锁定目标时变绿
+        if (!DrawDotSafe(r, g, b))
+        {
+            g_dotFailed = true;
+            LogMsg("AimDot: 绘制时发生异常，已自动关闭中心白点（不影响其它功能）");
+        }
     }
 
     // ---- G：附身 ----
@@ -673,13 +703,16 @@ private:
         f32 perp = perp2 > 0.0f ? sqrtf(perp2) : 0.0f;
 
         f32 score = 1e9f;
-        if (along > 0.3f && perp <= 1.2f + along * 0.10f)
+        // 有白点时只认"准星正下方"的人（人体半宽约 0.8m，远处略放宽）；没有白点时沿用宽松判定
+        f32 tol = g_crosshair ? (0.8f + along * 0.05f) : (1.2f + along * 0.10f);
+        if (along > 0.3f && perp <= tol)
             score = perp + along * 0.01f;                       // 离视线越近越好，同样近则选更近的
         if (r.hasG)
         {
             f32 ex = px - r.gx, ey = py - r.gy, ez = pz - r.gz;
             f32 gd = sqrtf(ex * ex + ey * ey + ez * ez);
-            if (gd <= PICK_RADIUS && gd + 0.5f < score) score = gd + 0.5f;   // 视线落点附近（优先级略低）
+            f32 pr = g_crosshair ? 1.6f : PICK_RADIUS;
+            if (gd <= pr && gd + 0.5f < score) score = gd + 0.5f;   // 视线落点附近（优先级略低）
         }
         if (score < *bestScore) { *bestScore = score; *best = c; }
     }
@@ -774,7 +807,7 @@ private:
 
         // 兜底（只在按 G 时）：严格判定没找到，就选视线夹角最小的人（约 26 度以内）
         if (best == 0 && !quick)
-            best = FindByAngle(r, 0.45f, NULL, NULL);
+            best = FindByAngle(r, g_crosshair ? 0.10f : 0.45f, NULL, NULL);   // 有白点时兜底只认约 6 度以内
 
         if (best == 0) return false;
         *out = best;
@@ -980,12 +1013,9 @@ private:
             RestoreNikoModel(true);
 
             // 3. Niko 回到一开始按 T 时的尸体位置，并移除那具尸体
-            if (m_nikoCorpse != 0 && DoesCharExist(m_nikoCorpse))
-            {
-                SetCharCoordinates(m_niko, m_cX, m_cY, m_cZ);
-                SetCharHeading(m_niko, m_cH);
-                ClearCharTasksImmediately(m_niko);
-            }
+            SetCharCoordinates(m_niko, m_cX, m_cY, m_cZ);       // 一律回到按 T 时的位置（尸体所在处）
+            SetCharHeading(m_niko, m_cH);
+            ClearCharTasksImmediately(m_niko);
             DeleteNikoCorpse();
 
             m_mode = MODE_IDLE;
